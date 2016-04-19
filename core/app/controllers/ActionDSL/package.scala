@@ -15,11 +15,12 @@
  */
 package controllers
 
-import io.kanaka.play.{Step, StepOps}
+import io.kanaka.play.{StepT, StepTOps}
 import play.api.data.Form
 import play.api.data.validation.ValidationError
 import play.api.libs.json.{JsPath, JsResult}
 import play.api.mvc.{Result, Results}
+import shims.{Functor, Monad}
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Success, Try}
@@ -31,115 +32,96 @@ package object ActionDSL {
 
   type JsErrorContent = Seq[(JsPath, Seq[ValidationError])]
 
-  private [ActionDSL] def fromFuture[A](onFailure: Throwable => Result)(future: Future[A])(implicit ec: ExecutionContext): Step[A] =
-    Step(
-      run = future.map(Right[Result, A](_)).recover{case t: Throwable => Left[Result, A](onFailure(t))},
-      executionContext = ec
-    )
+  private [ActionDSL] def fromFuture[A](onFailure: Throwable => Result)(future: Future[A])(implicit ec: ExecutionContext): StepT[Future, A] =
+    StepT[Future, A](future.map(Right[Result, A](_)).recover{case t: Throwable => Left[Result, A](onFailure(t))})
 
-  private [ActionDSL] def fromFOption[A](onNone: => Result)(fOption: Future[Option[A]])(implicit ec: ExecutionContext): Step[A] =
-    Step(
-      run = fOption.map{
-        case Some(a) => Right(a)
-        case None => Left(onNone)
-      }(ec),
-      executionContext = ec
-    )
+  private [ActionDSL] def fromFOption[F[_], A](onNone: => Result)(fOption: F[Option[A]])(implicit F: shims.Functor[F]): StepT[F, A] =
+    StepT[F, A](F.map(fOption)(_.fold[Either[Result, A]](Left(onNone))(Right(_))))
 
-  private [ActionDSL] def fromFEither[A,B](onLeft: B => Result)(fEither: Future[Either[B,A]])(implicit ec: ExecutionContext): Step[A] =
-    Step(
-      run = fEither.map(_.left.map(onLeft)),
-      executionContext = ec
-    )
+  private [ActionDSL] def fromFEither[F[_],A,B](onLeft: B => Result)(fEither: F[Either[B,A]])(implicit F: shims.Functor[F]): StepT[F, A] =
+    StepT[F, A](F.map(fEither)(_.left.map(onLeft)))
 
-  private [ActionDSL] def fromOption[A](onNone: => Result)(option: Option[A])(implicit ec: ExecutionContext): Step[A] =
-    Step(
-      run = Future.successful(option.fold[Either[Result,A]](Left(onNone))(Right(_))),
-      executionContext = ec
-    )
+  private [ActionDSL] def fromOption[F[_], A](onNone: => Result)(option: Option[A])(implicit F: shims.Monad[F]): StepT[F, A] =
+    StepT[F, A](F.point(option.fold[Either[Result,A]](Left(onNone))(Right(_))))
 
-  private [ActionDSL] def fromEither[A,B](onLeft: B => Result)(either: Either[B,A])(implicit ec: ExecutionContext): Step[A] =
-    Step(
-      run = Future.successful(either.left.map(onLeft)),
-      executionContext = ec
-    )
+  private [ActionDSL] def fromEither[F[_],A,B](onLeft: B => Result)(either: Either[B,A])(implicit F: shims.Monad[F]): StepT[F, A] =
+    StepT[F, A](F.point(either.left.map(onLeft)))
 
-  private [ActionDSL] def fromJsResult[A](onJsError: JsErrorContent => Result)(jsResult: JsResult[A])(implicit ec: ExecutionContext): Step[A] =
-    Step(
-      run = Future.successful(jsResult.fold(err => Left(onJsError(err)), Right(_))),
-      executionContext = ec
-    )
+  private [ActionDSL] def fromJsResult[F[_], A](onJsError: JsErrorContent => Result)(jsResult: JsResult[A])(implicit F: shims.Monad[F]): StepT[F, A] =
+    StepT[F, A](F.point(jsResult.fold(err => Left(onJsError(err)), Right(_))))
 
-  private [ActionDSL] def fromForm[A](onError: Form[A] => Result)(form: Form[A])(implicit ec: ExecutionContext): Step[A] =
-    Step(
-      run = Future.successful(form.fold(err => Left(onError(err)), Right(_))),
-      executionContext = ec
-    )
+  private [ActionDSL] def fromForm[F[_], A](onError: Form[A] => Result)(form: Form[A])(implicit F: shims.Monad[F]): StepT[F, A] =
+    StepT[F, A](F.point(form.fold(err => Left(onError(err)), Right(_))))
 
-  private [ActionDSL] def fromBoolean(onFalse: => Result)(boolean: Boolean)(implicit ec:ExecutionContext): Step[Unit] =
-    Step(
-      run = Future.successful(if(boolean) Right(()) else Left(onFalse)),
-      executionContext = ec
-    )
+  private [ActionDSL] def fromBoolean[F[_]](onFalse: => Result)(boolean: Boolean)(implicit F: shims.Monad[F]): StepT[F, Unit] =
+    StepT[F, Unit](F.point(if(boolean) Right(()) else Left(onFalse)))
 
-  private [ActionDSL] def fromTry[A](onFailure: Throwable => Result)(tryValue: Try[A])(implicit ec: ExecutionContext):Step[A] =
-    Step(
-      run = Future.successful(tryValue match {
+  private [ActionDSL] def fromTry[F[_], A](onFailure: Throwable => Result)(tryValue: Try[A])(implicit F: shims.Monad[F]):StepT[F, A] =
+    StepT[F, A](F.point(tryValue match {
         case Failure(t) => Left(onFailure(t))
         case Success(v) => Right(v)
-      }),
-      executionContext = ec
-    )
+      }))
 
-  trait MonadicActions {
+  trait MonadicActions0 {
 
     import scala.language.implicitConversions
 
     val executionContext: ExecutionContext = play.api.libs.concurrent.Execution.defaultContext
 
-    implicit class FutureOps[A](future: Future[A]) {
-      def -| : Step[A] = Step(future.map(Right(_))(executionContext), executionContext)
+    implicit val futureMonad: shims.Monad[Future] = new Monad[Future] {
+
+      override def map[A, B](fa: Future[A])(f: (A) => B): Future[B] = fa.map(f)(executionContext)
+
+      override def flatMap[A, B](fa: Future[A])(f: (A) => Future[B]): Future[B] = fa.flatMap(f)(executionContext)
+
+      override def point[A](a: A): Future[A] = Future.successful(a)
     }
 
-    implicit def futureToStepOps[A](future: Future[A]): StepOps[A, Throwable] = new StepOps[A, Throwable] {
+    implicit class BaseOps[F[_], A](base: F[A])(implicit F: shims.Functor[F]) {
+      def -| : StepT[F, A] = StepT[F, A](F.map(base)(Right(_)))
+    }
+
+    implicit def futureToStepOps[A](future: Future[A]): StepTOps[Future, A, Throwable] = new StepTOps[Future, A, Throwable] {
       override def orFailWith(failureHandler: (Throwable) => Result) = fromFuture(failureHandler)(future)(executionContext)
     }
+  }
 
-    implicit def fOptionToStepOps[A](fOption: Future[Option[A]]):StepOps[A,Unit] = new StepOps[A, Unit]{
-      override def orFailWith(failureHandler: Unit => Result) = fromFOption(failureHandler(()))(fOption)(executionContext)
+  trait MonadicActions extends MonadicActions0 {
+
+    implicit def fOptionToStepOps[F[+_], A](fOption: F[Option[A]])(implicit F: shims.Monad[F]): StepTOps[F, A,Unit] = new StepTOps[F, A, Unit]{
+      override def orFailWith(failureHandler: Unit => Result) = fromFOption(failureHandler(()))(fOption)
     }
 
-    implicit def fEitherToStepOps[A, B](fEither: Future[Either[B,A]]): StepOps[A,B] = new StepOps[A,B] {
-      override def orFailWith(failureHandler: (B) => Result) = fromFEither(failureHandler)(fEither)(executionContext)
+    implicit def fEitherToStepOps[F[_], A, B](fEither: F[Either[B,A]])(implicit F: shims.Functor[F]): StepTOps[F,A,B] = new StepTOps[F,A,B] {
+      override def orFailWith(failureHandler: (B) => Result) = fromFEither(failureHandler)(fEither)
     }
 
-    implicit def optionToStepOps[A](option: Option[A]):StepOps[A, Unit] = new StepOps[A, Unit] {
-      override def orFailWith(failureHandler: (Unit) => Result) = fromOption(failureHandler(()))(option)(executionContext)
+    implicit def optionToStepOps[F[_], A](option: Option[A])(implicit F: shims.Monad[F]): StepTOps[F, A, Unit] = new StepTOps[F, A, Unit] {
+      override def orFailWith(failureHandler: (Unit) => Result) = fromOption(failureHandler(()))(option)
     }
 
-    implicit def eitherToStepOps[A, B](either: Either[B,A]): StepOps[A,B] = new StepOps[A,B] {
-      override def orFailWith(failureHandler: (B) => Result) = fromEither(failureHandler)(either)(executionContext)
+    implicit def eitherToStepOps[F[_], A, B](either: Either[B,A])(implicit F: shims.Monad[F]): StepTOps[F,A,B] = new StepTOps[F,A,B] {
+      override def orFailWith(failureHandler: (B) => Result) = fromEither(failureHandler)(either)
     }
 
-
-    implicit def jsResultToStepOps[A](jsResult: JsResult[A]): StepOps[A, JsErrorContent] = new StepOps[A, JsErrorContent] {
-      override def orFailWith(failureHandler: (JsErrorContent) => Result) = fromJsResult(failureHandler)(jsResult)(executionContext)
+    implicit def jsResultToStepOps[F[_], A](jsResult: JsResult[A])(implicit F: shims.Monad[F]): StepTOps[F, A, JsErrorContent] = new StepTOps[F, A, JsErrorContent] {
+      override def orFailWith(failureHandler: (JsErrorContent) => Result) = fromJsResult(failureHandler)(jsResult)
     }
 
-    implicit def formToStepOps[A](form: Form[A]): StepOps[A, Form[A]] = new StepOps[A, Form[A]] {
-      override def orFailWith(failureHandler: (Form[A]) => Result) = fromForm(failureHandler)(form)(executionContext)
+    implicit def formToStepOps[F[_], A](form: Form[A])(implicit F: shims.Monad[F]): StepTOps[F, A, Form[A]] = new StepTOps[F, A, Form[A]] {
+      override def orFailWith(failureHandler: (Form[A]) => Result) = fromForm(failureHandler)(form)
     }
 
-    implicit def booleanToStepOps(boolean: Boolean): StepOps[Unit, Unit] = new StepOps[Unit, Unit] {
-      override def orFailWith(failureHandler: (Unit) => Result) = fromBoolean(failureHandler(()))(boolean)(executionContext)
+    implicit def booleanToStepOps[F[_]](boolean: Boolean)(implicit F: shims.Monad[F]): StepTOps[F, Unit, Unit] = new StepTOps[F, Unit, Unit] {
+      override def orFailWith(failureHandler: (Unit) => Result) = fromBoolean(failureHandler(()))(boolean)
     }
 
-    implicit def tryToStepOps[A](tryValue: Try[A]): StepOps[A, Throwable] = new StepOps[A, Throwable] {
-      override def orFailWith(failureHandler: (Throwable) => Result) = fromTry(failureHandler)(tryValue)(executionContext)
+    implicit def tryToStepOps[F[_], A](tryValue: Try[A])(implicit F: shims.Monad[F]): StepTOps[F, A, Throwable] = new StepTOps[F, A, Throwable] {
+      override def orFailWith(failureHandler: (Throwable) => Result) = fromTry(failureHandler)(tryValue)
     }
 
-    implicit def stepToResult[R <: Result](step: Step[R]): Future[Result] = step.run.map(_.merge)(executionContext)
+    implicit def stepToResult[F[_], R <: Result](step: StepT[F, R])(implicit F: shims.Functor[F]): F[Result] = F.map(step.run)(_.merge)
 
-    implicit def stepToEither[A](step: Step[A]): Future[Either[Result, A]] = step.run
+    implicit def stepToEither[F[_], A](step: StepT[F, A]): F[Either[Result, A]] = step.run
   }
 }

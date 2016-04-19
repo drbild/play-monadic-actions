@@ -2,32 +2,31 @@ package io.kanaka.play
 
 import play.api.mvc.{Result, Results}
 
-import scala.concurrent.{ExecutionContext, Future}
+final case class StepT[F[_], A](run: F[Either[Result, A]]) {
 
-/**
-  * @author Valentin Kasas
-  */
-final case class Step[A](run: Future[Either[Result, A]], executionContext: ExecutionContext) {
+  def map[B](f: A => B)(implicit F: shims.Functor[F]): StepT[F, B] =
+    StepT[F, B](F.map(run)(_.right.map(f)))
 
-  def map[B](f : A => B) = copy(run = run.map(_.right.map(f))(executionContext))
+  def flatMap[B](f: A => StepT[F, B])(implicit F: shims.Monad[F]): StepT[F, B] =
+    StepT[F, B](F.flatMap(run)(_.fold(r => F.point(Left(r)), a => f(a).run)))
 
-  def flatMap[B](f: A => Step[B]) = copy(run = run.flatMap(_.fold(err => Future.successful(Left[Result, B](err)), succ => f(succ).run))(executionContext))
+  def withFilter(p: A => Boolean)(implicit F: shims.Monad[F]): StepT[F, A] =
+     flatMap(a =>
+       if (p(a))
+         StepT[F, A](F.point(Right(a)))
+       else
+         StepT[F, A](F.point(Left(Results.InternalServerError)))
+     )
+}
 
-  def withFilter(p: A => Boolean): Step[A] = copy(run = run.filter {
-    case Right(a) if p(a) => true
-  }(executionContext))
+object StepT {
+
+  def point[F[_], A](a: A)(implicit F: shims.Monad[F]): StepT[F, A] = StepT[F, A](F.point(Right(a)))
 
 }
 
-object Step {
-
-  def unit[A](a: A): Step[A] = Step(Future.successful(Right(a)), scala.concurrent.ExecutionContext.global)
-
-}
-
-
-trait StepOps[A, B] {
-  def orFailWith(failureHandler: B => Result):Step[A]
-  def ?|(failureHandler: B => Result): Step[A] = orFailWith(failureHandler)
-  def ?|(failureThunk: => Result): Step[A] = orFailWith(_ => failureThunk)
+trait StepTOps[F[_], A, B] {
+  def orFailWith(failureHandler: B => Result): StepT[F, A]
+  def ?|(failureHandler: B => Result): StepT[F, A] = orFailWith(failureHandler)
+  def ?|(failureThunk: => Result): StepT[F, A] = orFailWith(_ => failureThunk)
 }

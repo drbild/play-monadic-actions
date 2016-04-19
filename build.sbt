@@ -1,8 +1,11 @@
 version in ThisBuild := "2.0.0-SNAPSHOT"
 
+val shimsVersion = "0.3"
+
 val commonSettings = Seq (
   resolvers += "scalaz-bintray" at "http://dl.bintray.com/scalaz/releases",
   libraryDependencies ++= Seq(
+    "com.codecommit" %% "shims-core" % shimsVersion,
     "com.typesafe.play" %% "play-specs2" % "2.4.3" % "test",
     "org.scalacheck" %% "scalacheck" % "1.13.0" % "test"
   )
@@ -16,7 +19,10 @@ lazy val scalaz = (project in file("scalaz"))
   .settings(commonSettings:_*)
   .settings(
     name := "play-monadic-actions-scalaz",
-    libraryDependencies ++= Seq("org.scalaz" %% "scalaz-core" % "7.1.0")
+    libraryDependencies ++= Seq(
+      "org.scalaz" %% "scalaz-core" % "7.1.0",
+      "com.codecommit" %% "shims-scalaz-71" % shimsVersion
+    )
   )
   .dependsOn(core)
   .enablePlugins(PlayScala)
@@ -26,7 +32,10 @@ lazy val cats = (project in file("cats"))
   .settings(commonSettings:_*)
   .settings(
     name := "play-monadic-actions-cats",
-    libraryDependencies ++= Seq("org.typelevel" %% "cats" % "0.4.1")
+    libraryDependencies ++= Seq(
+      "org.typelevel" %% "cats" % "0.4.1",
+      "com.codecommit" %% "shims-cats" % shimsVersion
+    )
   )
   .dependsOn(core)
   .enablePlugins(PlayScala)
